@@ -1,25 +1,18 @@
 use std::{collections::HashMap, sync::Arc};
 
-use anyhow::{Context as _, Error, Result};
-use chrono::{DateTime, Duration, NaiveDateTime, Utc};
-use chrono_tz::Tz::{self, Japan};
-use futures::future::{join_all, try_join_all};
+use anyhow::{Context as _, Result};
 use log::{error, warn};
 use serenity::model::{
-    event::MessageUpdateEvent,
     gateway::Ready,
     guild::Member,
-    id::{ChannelId, GuildId, MessageId},
+    id::ChannelId,
     prelude::{Channel, ChannelType, GuildChannel},
-    user::User,
     voice::VoiceState,
 };
-use tokio::time::sleep;
 
 use crate::app_config::AppConfig;
 
 use serenity::async_trait;
-use serenity::model::channel::Message;
 use serenity::prelude::*;
 
 /// イベント受信リスナー

@@ -1,6 +1,6 @@
 use anyhow::{Context as _, Result};
 use config::Config;
-use serenity::model::id::{ChannelId, RoleId};
+use serenity::model::id::ChannelId;
 
 #[derive(Debug, Default, serde::Deserialize, PartialEq, Clone)]
 pub struct DiscordConfig {
