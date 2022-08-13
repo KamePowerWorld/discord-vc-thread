@@ -196,6 +196,40 @@ impl Handler {
 
         Ok(())
     }
+
+    /// VC名前変更時にスレッドをリネームする
+    async fn rename_thread(&self, ctx: &Context, vc_channel_id: &ChannelId) -> Result<()> {
+        // マップからスレッドのチャンネルIDを取得
+        let channel_id = self
+            .vc_to_thread
+            .lock()
+            .await
+            .get(vc_channel_id)
+            .map(|c| c.clone());
+        // 一度変数に入れてからmatchにいれないとロックされっぱなしになる
+        match channel_id {
+            // スレッドが作成済みの場合
+            Some(thread_id) => {
+                // チャンネル名を取得
+                let channel_name = vc_channel_id
+                    .name(&ctx)
+                    .await
+                    .unwrap_or("不明なチャンネル".to_string());
+                // スレッドをリネーム
+                thread_id
+                    .edit_thread(ctx, |t| {
+                        t.name(channel_name);
+                        t
+                    })
+                    .await
+                    .context("スレッドのリネームに失敗")?;
+            }
+            // スレッドが作成されていない場合
+            None => {}
+        };
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -223,7 +257,27 @@ impl EventHandler for Handler {
     }
 
     /// VC名更新時
-    async fn channel_update(&self, _ctx: Context, _old: Option<Channel>, _new: Channel) {}
+    async fn channel_update(&self, _ctx: Context, _old: Option<Channel>, new: Channel) {
+        // チャンネルを取得
+        let vc_channel = match new.guild() {
+            Some(guild) => guild,
+            None => return,
+        };
+
+        // カスタムVCでない場合は無視
+        if !self.is_custom_vc(&vc_channel) {
+            return;
+        }
+
+        // VCスレッドチャンネルをリネーム
+        match self.rename_thread(&_ctx, &vc_channel.id).await {
+            Ok(_) => {}
+            Err(why) => {
+                error!("VCスレッドチャンネルのリネームに失敗: {:?}", why);
+                return;
+            }
+        }
+    }
 
     /// VCに参加/退出した時
     async fn voice_state_update(&self, ctx: Context, _old: Option<VoiceState>, new: VoiceState) {
