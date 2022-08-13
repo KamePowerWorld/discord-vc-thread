@@ -1,0 +1,4 @@
+[discord]
+vc_category = "000000000000000000"
+vc_ignored_channels = ["000000000000000000"]
+thread_channel = "000000000000000000"
