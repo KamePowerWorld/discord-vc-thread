@@ -392,8 +392,8 @@ impl Handler {
         interaction.create_interaction_response(&ctx, |r| {
             r.kind(InteractionResponseType::ChannelMessageWithSource)
                 .interaction_response_data(|d| {
-                    d.content("✅名前を変更しました");
-                    d.ephemeral(true);
+                    d.content(format!("✅{} が名前を変更しました", interaction.user.mention()));
+                    d.allowed_mentions(|m| m.empty_users());
                     d
                 });
             r
