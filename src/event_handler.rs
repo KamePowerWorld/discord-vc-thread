@@ -282,8 +282,8 @@ impl Handler {
         };
 
         // VCの権限をチェック
-        match vc_channel.permissions_for_user(&ctx, interaction.user.id).context("VCチャンネルのパーミッション取得に失敗")? {
-            vc_permission if vc_permission.manage_channels() => {},
+        match vc_channel.permissions_for_user(&ctx, interaction.user.id) {
+            Ok(vc_permission) if vc_permission.manage_channels() => {},
             _ => return {
                 interaction.create_interaction_response(&ctx, |r| {
                     r.kind(InteractionResponseType::ChannelMessageWithSource)
