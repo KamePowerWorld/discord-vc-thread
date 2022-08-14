@@ -3,10 +3,14 @@ use std::{collections::HashMap, sync::Arc};
 use anyhow::{Context as _, Result};
 use log::{error, warn};
 use serenity::model::{
+    application::interaction::{Interaction, InteractionResponseType},
     gateway::Ready,
     guild::Member,
     id::ChannelId,
-    prelude::{Channel, ChannelType, GuildChannel},
+    prelude::{
+        component::{ButtonStyle, InputTextStyle, ActionRowComponent},
+        Channel, ChannelType, GuildChannel, interaction::{message_component::MessageComponentInteraction, modal::ModalSubmitInteraction},
+    },
     voice::VoiceState,
 };
 
@@ -21,6 +25,8 @@ pub struct Handler {
     app_config: AppConfig,
     /// VC→スレッドのマップ
     vc_to_thread: Arc<Mutex<HashMap<ChannelId, ChannelId>>>,
+    /// スレッド→VCのマップ
+    thread_to_vc: Arc<Mutex<HashMap<ChannelId, ChannelId>>>,
 }
 
 impl Handler {
@@ -29,6 +35,7 @@ impl Handler {
         Ok(Self {
             app_config,
             vc_to_thread: Arc::new(Mutex::new(HashMap::new())),
+            thread_to_vc: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -127,7 +134,7 @@ impl Handler {
                 // スレッドを作成
                 let thread = thread_channel
                     .create_public_thread(ctx, &message, |m| {
-                        m.name(channel_name);
+                        m.name(&channel_name);
                         m.kind(ChannelType::PublicThread);
                         m
                     })
@@ -144,11 +151,29 @@ impl Handler {
                 // 参加メッセージ
                 thread
                     .send_message(ctx, |m| {
-                        m.content(format!("{} さんがVCを作成しました。", member.mention(),));
+                        m.content(format!("{} `{}`へようこそ。\n興味を引くチャンネル名に変えてみんなを呼び込もう！", member.mention(), &channel_name));
+                        m.components(|c| {
+                            c.create_action_row(|f| {
+                                f.create_button(|b| {
+                                    b.label("📝チャンネル名を変える");
+                                    b.style(ButtonStyle::Success);
+                                    b.custom_id("rename_button");
+                                    b
+                                });
+                                f
+                            });
+                            c
+                        });        
                         m
                     })
                     .await
                     .context("参加メッセージの作成に失敗")?;
+
+                // VCを登録
+                self.thread_to_vc
+                    .lock()
+                    .await
+                    .insert(thread.id, vc_channel_id.clone());
 
                 // スレッドを登録
                 self.vc_to_thread
@@ -223,6 +248,161 @@ impl Handler {
 
         Ok(())
     }
+
+    /// VCを取得
+    async fn get_vc(&self, ctx: &Context, channel_id: &ChannelId) -> Result<GuildChannel> {
+        // マップからスレッドのチャンネルIDを取得
+        // 一度変数に入れてからmatchにいれないとロックされっぱなしになる
+        let vc_channel_id = self.thread_to_vc.lock().await.get(channel_id).map(|c| c.clone()).ok_or(anyhow::anyhow!("無効なVCチャンネル"))?;
+        let vc_channel = vc_channel_id.to_channel(&ctx).await.context("チャンネルの取得に失敗")?;
+        let vc_channel = vc_channel.guild().ok_or(anyhow::anyhow!("無効なVCチャンネルの種類"))?;
+        Ok(vc_channel)
+    }
+
+    /// VC名前変更時にスレッドをリネームする
+    async fn button_pressed(&self, ctx: &Context, interaction: &MessageComponentInteraction) -> Result<()> {
+        // VCチャンネルを取得
+        let vc_channel = match self.get_vc(ctx, &interaction.channel_id).await {
+            Ok(vc_channel) => vc_channel,
+            Err(_) => return {
+                interaction.create_interaction_response(&ctx, |r| {
+                    r.kind(InteractionResponseType::ChannelMessageWithSource)
+                        .interaction_response_data(|d| {
+                            d.content("❌そのVCは既に解散しています");
+                            d.ephemeral(true);
+                            d
+                        });
+                    r
+                })
+                .await
+                .context("エラー内容の応答に失敗")?;
+
+                Ok(())
+            },
+        };
+
+        // VCの権限をチェック
+        match vc_channel.permissions_for_user(&ctx, interaction.user.id).context("VCチャンネルのパーミッション取得に失敗")? {
+            vc_permission if vc_permission.manage_channels() => {},
+            _ => return {
+                interaction.create_interaction_response(&ctx, |r| {
+                    r.kind(InteractionResponseType::ChannelMessageWithSource)
+                        .interaction_response_data(|d| {
+                            d.content("❌VCのオーナーのみが名前を変更できます");
+                            d.ephemeral(true);
+                            d
+                        });
+                    r
+                })
+                .await
+                .context("エラー内容の応答に失敗")?;
+
+                Ok(())
+            },
+        };
+
+        // モーダルダイアログを開く
+        interaction.create_interaction_response(&ctx, |r| {
+            r.kind(InteractionResponseType::Modal)
+                .interaction_response_data(|d| {
+                    d.custom_id("rename_title");
+                    d.title("✏️チャンネル名を変える");
+                    d.components(|c| {
+                        c.create_action_row(|f| {
+                            f.create_input_text(|t| {
+                                t.custom_id("rename_text");
+                                t.label("VCのテーマは？");
+                                t.placeholder("フォートナイト, しりとり, カラオケ,...");
+                                t.style(InputTextStyle::Short);
+                                t
+                            });
+                            f
+                        });
+                        c
+                    });
+                    d
+                });
+            r
+        })
+        .await
+        .context("ダイアログの作成に失敗")?;
+
+        Ok(())
+    }
+
+    /// VC名前変更時にスレッドをリネームする
+    async fn rename_vc(&self, ctx: &Context, interaction: &ModalSubmitInteraction) -> Result<()> {
+        // VCチャンネルを取得
+        let mut vc_channel = match self.get_vc(ctx, &interaction.channel_id).await {
+            Ok(vc_channel) => vc_channel,
+            Err(_) => return {
+                interaction.create_interaction_response(&ctx, |r| {
+                    r.kind(InteractionResponseType::ChannelMessageWithSource)
+                        .interaction_response_data(|d| {
+                            d.content("❌そのVCは既に解散しています");
+                            d.ephemeral(true);
+                            d
+                        });
+                    r
+                })
+                .await
+                .context("エラー内容の応答に失敗")?;
+
+                Ok(())
+            },
+        };
+
+        // VCの権限をチェック
+        match vc_channel.permissions_for_user(&ctx, interaction.user.id).context("VCチャンネルのパーミッション取得に失敗")? {
+            vc_permission if vc_permission.manage_channels() => {},
+            _ => return {
+                interaction.create_interaction_response(&ctx, |r| {
+                    r.kind(InteractionResponseType::ChannelMessageWithSource)
+                        .interaction_response_data(|d| {
+                            d.content("❌VCのオーナーのみが名前を変更できます");
+                            d.ephemeral(true);
+                            d
+                        });
+                    r
+                })
+                .await
+                .context("エラー内容の応答に失敗")?;
+
+                Ok(())
+            },
+        };
+
+        // VC名前を変更
+        let name = interaction.data.components
+            .iter()
+            .flat_map(|c| c.components.iter())
+            .find_map(|c| {
+                match c {
+                    ActionRowComponent::InputText(t) if t.custom_id == "rename_text" => Some(t.value.clone()),
+                    _ => None,
+                }
+            })
+            .ok_or(anyhow::anyhow!("コンポーネントが見つかりません"))?;
+        vc_channel.edit(&ctx, |e| {
+            e.name(name);
+            e
+        }).await.context("VC名前変更に失敗")?;
+
+        // 返答
+        interaction.create_interaction_response(&ctx, |r| {
+            r.kind(InteractionResponseType::ChannelMessageWithSource)
+                .interaction_response_data(|d| {
+                    d.content("✅名前を変更しました");
+                    d.ephemeral(true);
+                    d
+                });
+            r
+        })
+        .await
+        .context("結果の応答に失敗")?;
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -230,6 +410,34 @@ impl EventHandler for Handler {
     /// 準備完了時に呼ばれる
     async fn ready(&self, _ctx: Context, data_about_bot: Ready) {
         warn!("Bot準備完了: {}", data_about_bot.user.tag());
+    }
+
+    /// VCで話すボタンが押された時
+    async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
+        // 不明なインタラクションは無視
+        match interaction {
+            Interaction::MessageComponent(interaction) if interaction.data.custom_id == "rename_button" => {
+                // 名前変更チェック&反応
+                match self.button_pressed(&ctx, &interaction).await {
+                    Ok(_) => {}
+                    Err(why) => {
+                        error!("インタラクションの処理に失敗: {:?}", why);
+                        return;
+                    }
+                }
+            },
+            Interaction::ModalSubmit(interaction) if interaction.data.custom_id == "rename_title" => {
+                // テキスト入力があったらVC名前変更
+                match self.rename_vc(&ctx, &interaction).await {
+                    Ok(_) => {}
+                    Err(why) => {
+                        error!("インタラクションの処理に失敗: {:?}", why);
+                        return;
+                    }
+                }
+            }
+            _ => return,
+        };
     }
 
     /// VC削除時
