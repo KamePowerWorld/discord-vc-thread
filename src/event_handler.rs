@@ -445,12 +445,17 @@ impl Handler {
             let bot = &self.bot_user_id.lock().await.context("自身のBotユーザーの取得に失敗")?;
             // 議題メッセージを編集
             match message.edit(ctx, |m| {
-                m.content(format!(
-                    "`{}` のVCが終了しました。\n通話時間: `{}`\n参加者: {}",
-                    thread_name,
-                    duration,
-                    members.iter().filter_map(|m| m.user_id).filter(|m| m != bot).map(|m| m.mention().to_string()).collect::<Vec<_>>().join(" "),
-                ));
+                m.embed(|f| {
+                    f.title("VCが終了しました");
+                    f.description(format!(
+                        "`{}` のVCが終了しました",
+                        thread_name,
+                    ));
+                    f.field("通話時間", duration, true);
+                    let member_mentions = members.iter().filter_map(|m| m.user_id).filter(|m| m != bot).map(|m| m.mention().to_string()).collect::<Vec<_>>().join(" ");
+                    f.field("参加者", member_mentions, false);
+                    f
+                });
                 m.allowed_mentions(|m| m.empty_users());
                 m
             }).await {
