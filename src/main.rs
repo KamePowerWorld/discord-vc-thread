@@ -29,7 +29,9 @@ async fn main() -> Result<()> {
 
     // 環境変数のトークンを使用してDiscord APIを初期化
     let token = env::var("DISCORD_TOKEN").context("トークンが指定されていません")?;
-    let intents = GatewayIntents::non_privileged() | GatewayIntents::MESSAGE_CONTENT | GatewayIntents::GUILD_MEMBERS;
+    let intents = GatewayIntents::non_privileged()
+        | GatewayIntents::MESSAGE_CONTENT
+        | GatewayIntents::GUILD_MEMBERS;
     let mut client = Client::builder(token, intents)
         .event_handler(handler)
         .framework(framework)

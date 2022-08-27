@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::{Context as _, Result};
 use chrono::Utc;
+use hhmmss::Hhmmss;
 use log::{error, warn};
 use serenity::model::{
     application::interaction::{Interaction, InteractionResponseType},
@@ -9,12 +10,14 @@ use serenity::model::{
     guild::Member,
     id::ChannelId,
     prelude::{
-        component::{ButtonStyle, InputTextStyle, ActionRowComponent},
-        Channel, ChannelType, GuildChannel, interaction::{message_component::MessageComponentInteraction, modal::ModalSubmitInteraction}, Message, UserId,
+        component::{ActionRowComponent, ButtonStyle, InputTextStyle},
+        interaction::{
+            message_component::MessageComponentInteraction, modal::ModalSubmitInteraction,
+        },
+        Channel, ChannelType, GuildChannel, Message, UserId,
     },
     voice::VoiceState,
 };
-use hhmmss::Hhmmss;
 
 use crate::app_config::AppConfig;
 
@@ -171,7 +174,7 @@ impl Handler {
                                 f
                             });
                             c
-                        });        
+                        });
                         m
                     })
                     .await
@@ -238,79 +241,101 @@ impl Handler {
     async fn get_vc(&self, ctx: &Context, channel_id: &ChannelId) -> Result<GuildChannel> {
         // マップからスレッドのチャンネルIDを取得
         // 一度変数に入れてからmatchにいれないとロックされっぱなしになる
-        let vc_channel_id = self.thread_to_vc.lock().await.get(channel_id).map(|c| c.clone()).ok_or(anyhow::anyhow!("無効なVCチャンネル"))?;
-        let vc_channel = vc_channel_id.to_channel(&ctx).await.context("チャンネルの取得に失敗")?;
-        let vc_channel = vc_channel.guild().ok_or(anyhow::anyhow!("無効なVCチャンネルの種類"))?;
+        let vc_channel_id = self
+            .thread_to_vc
+            .lock()
+            .await
+            .get(channel_id)
+            .map(|c| c.clone())
+            .ok_or(anyhow::anyhow!("無効なVCチャンネル"))?;
+        let vc_channel = vc_channel_id
+            .to_channel(&ctx)
+            .await
+            .context("チャンネルの取得に失敗")?;
+        let vc_channel = vc_channel
+            .guild()
+            .ok_or(anyhow::anyhow!("無効なVCチャンネルの種類"))?;
         Ok(vc_channel)
     }
 
     /// VC名前変更時にスレッドをリネームする
-    async fn button_pressed(&self, ctx: &Context, interaction: &MessageComponentInteraction) -> Result<()> {
+    async fn button_pressed(
+        &self,
+        ctx: &Context,
+        interaction: &MessageComponentInteraction,
+    ) -> Result<()> {
         // VCチャンネルを取得
         let vc_channel = match self.get_vc(ctx, &interaction.channel_id).await {
             Ok(vc_channel) => vc_channel,
-            Err(_) => return {
-                interaction.create_interaction_response(&ctx, |r| {
-                    r.kind(InteractionResponseType::ChannelMessageWithSource)
-                        .interaction_response_data(|d| {
-                            d.content("❌そのVCは既に解散しています");
-                            d.ephemeral(true);
-                            d
-                        });
-                    r
-                })
-                .await
-                .context("エラー内容の応答に失敗")?;
+            Err(_) => {
+                return {
+                    interaction
+                        .create_interaction_response(&ctx, |r| {
+                            r.kind(InteractionResponseType::ChannelMessageWithSource)
+                                .interaction_response_data(|d| {
+                                    d.content("❌そのVCは既に解散しています");
+                                    d.ephemeral(true);
+                                    d
+                                });
+                            r
+                        })
+                        .await
+                        .context("エラー内容の応答に失敗")?;
 
-                Ok(())
-            },
+                    Ok(())
+                }
+            }
         };
 
         // VCの権限をチェック
         match vc_channel.permissions_for_user(&ctx, interaction.user.id) {
-            Ok(vc_permission) if vc_permission.manage_channels() => {},
-            _ => return {
-                interaction.create_interaction_response(&ctx, |r| {
-                    r.kind(InteractionResponseType::ChannelMessageWithSource)
-                        .interaction_response_data(|d| {
-                            d.content("❌VCのオーナーのみが名前を変更できます");
-                            d.ephemeral(true);
-                            d
-                        });
-                    r
-                })
-                .await
-                .context("エラー内容の応答に失敗")?;
+            Ok(vc_permission) if vc_permission.manage_channels() => {}
+            _ => {
+                return {
+                    interaction
+                        .create_interaction_response(&ctx, |r| {
+                            r.kind(InteractionResponseType::ChannelMessageWithSource)
+                                .interaction_response_data(|d| {
+                                    d.content("❌VCのオーナーのみが名前を変更できます");
+                                    d.ephemeral(true);
+                                    d
+                                });
+                            r
+                        })
+                        .await
+                        .context("エラー内容の応答に失敗")?;
 
-                Ok(())
-            },
+                    Ok(())
+                }
+            }
         };
 
         // モーダルダイアログを開く
-        interaction.create_interaction_response(&ctx, |r| {
-            r.kind(InteractionResponseType::Modal)
-                .interaction_response_data(|d| {
-                    d.custom_id("rename_title");
-                    d.title("✏️チャンネル名を変える");
-                    d.components(|c| {
-                        c.create_action_row(|f| {
-                            f.create_input_text(|t| {
-                                t.custom_id("rename_text");
-                                t.label("VCのテーマは？");
-                                t.placeholder("フォートナイト, しりとり, カラオケ,...");
-                                t.style(InputTextStyle::Short);
-                                t
+        interaction
+            .create_interaction_response(&ctx, |r| {
+                r.kind(InteractionResponseType::Modal)
+                    .interaction_response_data(|d| {
+                        d.custom_id("rename_title");
+                        d.title("✏️チャンネル名を変える");
+                        d.components(|c| {
+                            c.create_action_row(|f| {
+                                f.create_input_text(|t| {
+                                    t.custom_id("rename_text");
+                                    t.label("VCのテーマは？");
+                                    t.placeholder("フォートナイト, しりとり, カラオケ,...");
+                                    t.style(InputTextStyle::Short);
+                                    t
+                                });
+                                f
                             });
-                            f
+                            c
                         });
-                        c
+                        d
                     });
-                    d
-                });
-            r
-        })
-        .await
-        .context("ダイアログの作成に失敗")?;
+                r
+            })
+            .await
+            .context("ダイアログの作成に失敗")?;
 
         Ok(())
     }
@@ -320,99 +345,121 @@ impl Handler {
         // VCチャンネルを取得
         let mut vc_channel = match self.get_vc(ctx, &interaction.channel_id).await {
             Ok(vc_channel) => vc_channel,
-            Err(_) => return {
-                interaction.create_interaction_response(&ctx, |r| {
-                    r.kind(InteractionResponseType::ChannelMessageWithSource)
-                        .interaction_response_data(|d| {
-                            d.content("❌そのVCは既に解散しています");
-                            d.ephemeral(true);
-                            d
-                        });
-                    r
-                })
-                .await
-                .context("エラー内容の応答に失敗")?;
+            Err(_) => {
+                return {
+                    interaction
+                        .create_interaction_response(&ctx, |r| {
+                            r.kind(InteractionResponseType::ChannelMessageWithSource)
+                                .interaction_response_data(|d| {
+                                    d.content("❌そのVCは既に解散しています");
+                                    d.ephemeral(true);
+                                    d
+                                });
+                            r
+                        })
+                        .await
+                        .context("エラー内容の応答に失敗")?;
 
-                Ok(())
-            },
+                    Ok(())
+                }
+            }
         };
 
         // VCの権限をチェック
-        match vc_channel.permissions_for_user(&ctx, interaction.user.id).context("VCチャンネルのパーミッション取得に失敗")? {
-            vc_permission if vc_permission.manage_channels() => {},
-            _ => return {
-                interaction.create_interaction_response(&ctx, |r| {
-                    r.kind(InteractionResponseType::ChannelMessageWithSource)
-                        .interaction_response_data(|d| {
-                            d.content("❌VCのオーナーのみが名前を変更できます");
-                            d.ephemeral(true);
-                            d
-                        });
-                    r
-                })
-                .await
-                .context("エラー内容の応答に失敗")?;
+        match vc_channel
+            .permissions_for_user(&ctx, interaction.user.id)
+            .context("VCチャンネルのパーミッション取得に失敗")?
+        {
+            vc_permission if vc_permission.manage_channels() => {}
+            _ => {
+                return {
+                    interaction
+                        .create_interaction_response(&ctx, |r| {
+                            r.kind(InteractionResponseType::ChannelMessageWithSource)
+                                .interaction_response_data(|d| {
+                                    d.content("❌VCのオーナーのみが名前を変更できます");
+                                    d.ephemeral(true);
+                                    d
+                                });
+                            r
+                        })
+                        .await
+                        .context("エラー内容の応答に失敗")?;
 
-                Ok(())
-            },
+                    Ok(())
+                }
+            }
         };
 
         // VC名前を変更
-        let name = interaction.data.components
+        let name = interaction
+            .data
+            .components
             .iter()
             .flat_map(|c| c.components.iter())
-            .find_map(|c| {
-                match c {
-                    ActionRowComponent::InputText(t) if t.custom_id == "rename_text" => Some(t.value.clone()),
-                    _ => None,
+            .find_map(|c| match c {
+                ActionRowComponent::InputText(t) if t.custom_id == "rename_text" => {
+                    Some(t.value.clone())
                 }
+                _ => None,
             })
             .ok_or(anyhow::anyhow!("コンポーネントが見つかりません"))?;
-        vc_channel.edit(&ctx, |e| {
-            e.name(name);
-            e
-        }).await.context("VC名前変更に失敗")?;
+        vc_channel
+            .edit(&ctx, |e| {
+                e.name(name);
+                e
+            })
+            .await
+            .context("VC名前変更に失敗")?;
 
         // 返答
-        interaction.create_interaction_response(&ctx, |r| {
-            r.kind(InteractionResponseType::ChannelMessageWithSource)
-                .interaction_response_data(|d| {
-                    d.content(format!("✅{} が名前を変更しました", interaction.user.mention()));
-                    d.allowed_mentions(|m| m.empty_users());
-                    d
-                });
-            r
-        })
-        .await
-        .context("結果の応答に失敗")?;
+        interaction
+            .create_interaction_response(&ctx, |r| {
+                r.kind(InteractionResponseType::ChannelMessageWithSource)
+                    .interaction_response_data(|d| {
+                        d.content(format!(
+                            "✅{} が名前を変更しました",
+                            interaction.user.mention()
+                        ));
+                        d.allowed_mentions(|m| m.empty_users());
+                        d
+                    });
+                r
+            })
+            .await
+            .context("結果の応答に失敗")?;
 
         Ok(())
     }
 
     /// スレッドの議題メッセージを後始末する
-    async fn finalize_agenda_message(&self, ctx: &Context, thread_channel_id: &ChannelId) -> Result<bool> {
+    async fn finalize_agenda_message(
+        &self,
+        ctx: &Context,
+        thread_channel_id: &ChannelId,
+    ) -> Result<bool> {
         // 最近5件のメッセージを取得
-        let messages = thread_channel_id.messages(&ctx, |f| {
-            f.limit(5);
-            f
-        }).await.context("メッセージ取得に失敗")?;
-        
+        let messages = thread_channel_id
+            .messages(&ctx, |f| {
+                f.limit(5);
+                f
+            })
+            .await
+            .context("メッセージ取得に失敗")?;
+
         // チャンネルID->議題メッセージを取得
-        let mut message_map = self.thread_to_agenda_message
-            .lock()
-            .await;
-        let message = match message_map
-            .get_mut(&thread_channel_id) {
-                Some(message) => message,
-                None => return Ok(false),
-            };
+        let mut message_map = self.thread_to_agenda_message.lock().await;
+        let message = match message_map.get_mut(&thread_channel_id) {
+            Some(message) => message,
+            None => return Ok(false),
+        };
 
         // 最新の5件に人間のメッセージがなければ議題メッセージを削除
         let should_delete_agenda_message = !messages.iter().any(|m| !m.author.bot);
         let should_delete_thread = if should_delete_agenda_message {
             // メッセージがあれば議題メッセージを削除
             match message.delete(&ctx).await {
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(why) => {
                     // メッセージが削除できなくてもチャンネルをアーカイブしたいので、ログを出力だけしておく
                     error!("VC解散時に議題メッセージを削除できませんでした: {:?}", why);
@@ -423,49 +470,66 @@ impl Handler {
             messages.len() <= 2
         } else {
             // メンバー取得
-            let members = thread_channel_id.get_thread_members(&ctx).await.context("メンバー取得に失敗")?;
+            let members = thread_channel_id
+                .get_thread_members(&ctx)
+                .await
+                .context("メンバー取得に失敗")?;
             // スレッドの名前と作成時刻を取得
             let (thread_name, thread_created_at) = match thread_channel_id.to_channel(&ctx).await? {
                 Channel::Guild(guild_channel) => {
                     let thread_name = guild_channel.name.clone();
-                    let thread_created_at = guild_channel.thread_metadata.and_then(|m| m.create_timestamp);
+                    let thread_created_at = guild_channel
+                        .thread_metadata
+                        .and_then(|m| m.create_timestamp);
                     (thread_name, thread_created_at)
-                },
+                }
                 _ => ("不明なVC".to_string(), None),
             };
             // 通話時間を計算
-            let duration = thread_created_at.map(|created_at| {
-                let created_at = created_at.naive_utc();
-                let now = Utc::now().naive_utc();
-                let duration = now - created_at;
-                duration.hhmmss()
-            }).unwrap_or("--:--:--".to_string());
-            
+            let duration = thread_created_at
+                .map(|created_at| {
+                    let created_at = created_at.naive_utc();
+                    let now = Utc::now().naive_utc();
+                    let duration = now - created_at;
+                    duration.hhmmss()
+                })
+                .unwrap_or("--:--:--".to_string());
+
             // Botを取得
-            let bot = &self.bot_user_id.lock().await.context("自身のBotユーザーの取得に失敗")?;
+            let bot = &self
+                .bot_user_id
+                .lock()
+                .await
+                .context("自身のBotユーザーの取得に失敗")?;
             // 議題メッセージを編集
-            match message.edit(ctx, |m| {
-                m.embed(|f| {
-                    f.title("VCが終了しました");
-                    f.description(format!(
-                        "`{}` のVCが終了しました",
-                        thread_name,
-                    ));
-                    f.field("通話時間", duration, true);
-                    let member_mentions = members.iter().filter_map(|m| m.user_id).filter(|m| m != bot).map(|m| m.mention().to_string()).collect::<Vec<_>>().join(" ");
-                    f.field("参加者", member_mentions, false);
-                    f
-                });
-                m.allowed_mentions(|m| m.empty_users());
-                m
-            }).await {
-                Ok(_) => {},
+            match message
+                .edit(ctx, |m| {
+                    m.embed(|f| {
+                        f.title("VCが終了しました");
+                        f.description(format!("`{}` のVCが終了しました", thread_name,));
+                        f.field("通話時間", duration, true);
+                        let member_mentions = members
+                            .iter()
+                            .filter_map(|m| m.user_id)
+                            .filter(|m| m != bot)
+                            .map(|m| m.mention().to_string())
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        f.field("参加者", member_mentions, false);
+                        f
+                    });
+                    m.allowed_mentions(|m| m.empty_users());
+                    m
+                })
+                .await
+            {
+                Ok(_) => {}
                 Err(why) => {
                     // メッセージが編集できなくてもチャンネルをアーカイブしたいので、ログを出力だけしておく
                     error!("VC解散時に議題メッセージを削除できませんでした: {:?}", why);
                 }
             };
-            
+
             false
         };
 
@@ -488,7 +552,9 @@ impl EventHandler for Handler {
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         // 不明なインタラクションは無視
         match interaction {
-            Interaction::MessageComponent(interaction) if interaction.data.custom_id == "rename_button" => {
+            Interaction::MessageComponent(interaction)
+                if interaction.data.custom_id == "rename_button" =>
+            {
                 // 名前変更チェック&反応
                 match self.button_pressed(&ctx, &interaction).await {
                     Ok(_) => {}
@@ -497,8 +563,10 @@ impl EventHandler for Handler {
                         return;
                     }
                 }
-            },
-            Interaction::ModalSubmit(interaction) if interaction.data.custom_id == "rename_title" => {
+            }
+            Interaction::ModalSubmit(interaction)
+                if interaction.data.custom_id == "rename_title" =>
+            {
                 // テキスト入力があったらVC名前変更
                 match self.rename_vc(&ctx, &interaction).await {
                     Ok(_) => {}
@@ -538,7 +606,10 @@ impl EventHandler for Handler {
         let should_delete = match self.finalize_agenda_message(&ctx, &thread_channel_id).await {
             Ok(del) => del,
             Err(why) => {
-                error!("VCチャンネルで会話がなかったが、議題メッセージ削除に失敗: {:?}", why);
+                error!(
+                    "VCチャンネルで会話がなかったが、議題メッセージ削除に失敗: {:?}",
+                    why
+                );
                 false
             }
         };
@@ -555,10 +626,13 @@ impl EventHandler for Handler {
             }
         } else {
             // VCスレッドチャンネルをアーカイブ
-            match thread_channel_id.edit_thread(ctx, |t| {
-                t.archived(true);
-                t
-            }).await {
+            match thread_channel_id
+                .edit_thread(ctx, |t| {
+                    t.archived(true);
+                    t
+                })
+                .await
+            {
                 Ok(_) => {}
                 Err(why) => {
                     error!("VCスレッドチャンネルのアーカイブに失敗: {:?}", why);
