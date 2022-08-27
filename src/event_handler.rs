@@ -454,21 +454,12 @@ impl Handler {
             None => return Ok(false),
         };
 
-        // 最新の5件に人間のメッセージがなければ議題メッセージを削除
-        let should_delete_agenda_message = !messages.iter().any(|m| !m.author.bot);
-        let should_delete_thread = if should_delete_agenda_message {
-            // メッセージがあれば議題メッセージを削除
-            match message.delete(&ctx).await {
-                Ok(_) => {}
-                Err(why) => {
-                    // メッセージが削除できなくてもチャンネルをアーカイブしたいので、ログを出力だけしておく
-                    error!("VC解散時に議題メッセージを削除できませんでした: {:?}", why);
-                }
-            };
+        // メッセージが2件(Botが最初に投稿するメッセージ)以下だったらスレッドを削除するフラグ
+        let should_delete_thread = messages.len() <= 2;
 
-            // メッセージが2件(Botが最初に投稿するメッセージ)以下だったらスレッドを削除するフラグを返す
-            messages.len() <= 2
-        } else {
+        // スレッドを消す予定がない場合は、議題メッセージを変更
+        // 議題メッセージを削除する前に議題メッセージを変更しておくことで、スレッドの最初にメッセージを変えることができる
+        if !should_delete_thread {
             // メンバー取得
             let members = thread_channel_id
                 .get_thread_members(&ctx)
@@ -504,9 +495,10 @@ impl Handler {
             // 議題メッセージを編集
             match message
                 .edit(ctx, |m| {
+                    m.content("");
                     m.embed(|f| {
-                        f.title("VCが終了しました");
-                        f.description(format!("`{}` のVCが終了しました", thread_name,));
+                        f.title(&thread_name);
+                        f.description(format!("`{}` のVCが終了しました", &thread_name));
                         f.field("通話時間", duration, true);
                         let member_mentions = members
                             .iter()
@@ -529,9 +521,19 @@ impl Handler {
                     error!("VC解散時に議題メッセージを削除できませんでした: {:?}", why);
                 }
             };
+        }
 
-            false
-        };
+        // 最新の5件に人間のメッセージがなければ議題メッセージを削除
+        if !messages.iter().any(|m| !m.author.bot) {
+            // メッセージがあれば議題メッセージを削除
+            match message.delete(&ctx).await {
+                Ok(_) => {}
+                Err(why) => {
+                    // メッセージが削除できなくてもチャンネルをアーカイブしたいので、ログを出力だけしておく
+                    error!("VC解散時に議題メッセージを削除できませんでした: {:?}", why);
+                }
+            };
+        }
 
         Ok(should_delete_thread)
     }
