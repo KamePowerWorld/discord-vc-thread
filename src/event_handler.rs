@@ -9,7 +9,7 @@ use serenity::model::{
     id::ChannelId,
     prelude::{
         component::{ButtonStyle, InputTextStyle, ActionRowComponent},
-        Channel, ChannelType, GuildChannel, interaction::{message_component::MessageComponentInteraction, modal::ModalSubmitInteraction},
+        Channel, ChannelType, GuildChannel, interaction::{message_component::MessageComponentInteraction, modal::ModalSubmitInteraction}, Message,
     },
     voice::VoiceState,
 };
@@ -27,6 +27,8 @@ pub struct Handler {
     vc_to_thread: Arc<Mutex<HashMap<ChannelId, ChannelId>>>,
     /// スレッド→VCのマップ
     thread_to_vc: Arc<Mutex<HashMap<ChannelId, ChannelId>>>,
+    /// スレッド→VC作成時のメッセージのIDのマップ
+    thread_to_message: Arc<Mutex<HashMap<ChannelId, Message>>>,
 }
 
 impl Handler {
@@ -36,6 +38,7 @@ impl Handler {
             app_config,
             vc_to_thread: Arc::new(Mutex::new(HashMap::new())),
             thread_to_vc: Arc::new(Mutex::new(HashMap::new())),
+            thread_to_message: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -169,17 +172,23 @@ impl Handler {
                     .await
                     .context("参加メッセージの作成に失敗")?;
 
-                // VCを登録
+                // スレッドID->VCを登録
                 self.thread_to_vc
                     .lock()
                     .await
                     .insert(thread.id, vc_channel_id.clone());
 
-                // スレッドを登録
+                // チャンネルID->スレッドを登録
                 self.vc_to_thread
                     .lock()
                     .await
                     .insert(vc_channel_id.clone(), thread.id);
+
+                // チャンネルID->スレッドを登録
+                self.thread_to_message
+                    .lock()
+                    .await
+                    .insert(thread.id, message);
             }
         };
 
@@ -403,6 +412,46 @@ impl Handler {
 
         Ok(())
     }
+
+    /// 誰も話していないスレッドのメッセージを消す
+    async fn delete_message_if_no_talk(&self, ctx: &Context, channel: &GuildChannel) -> Result<()> {
+        // マップからスレッドのチャンネルIDを取得
+        let channel_id = self
+            .vc_to_thread
+            .lock()
+            .await
+            .get(&channel.id)
+            .map(|c| c.clone());
+
+        // チャンネルIDが見つけれなければ終了
+        let channel_id = match channel_id {
+            Some(channel_id) => channel_id,
+            None => return Ok(()),
+        };
+
+        // 最近5件のメッセージを取得
+        let messages = channel_id.messages(&ctx, |f| {
+            f.limit(5);
+            f
+        }).await.context("メッセージ取得に失敗")?;
+        
+        // 最新の5件に人間のメッセージがなければスレッドのメッセージを削除
+        if messages.iter().any(|m| !m.author.bot) {
+            return Ok(())
+        }
+    
+        // ボット以外のメッセージがないため、スレッドのメッセージを削除
+        // チャンネルID->メッセージを取得
+        if let Some(message) = self.thread_to_message
+            .lock()
+            .await
+            .get(&channel_id) {
+                // メッセージがあれば削除
+                message.delete(&ctx).await.context("メッセージ削除に失敗")?;
+            }
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -445,6 +494,14 @@ impl EventHandler for Handler {
         // カスタムVCでない場合は無視
         if !self.is_custom_vc(channel) {
             return;
+        }
+
+        // VCで誰も喋ってなかったらメッセージを削除
+        match self.delete_message_if_no_talk(&ctx, channel).await {
+            Ok(_) => {}
+            Err(why) => {
+                error!("VCチャンネルで会話がなかったが、メッセージ削除に失敗: {:?}", why);
+            }
         }
 
         // VCスレッドチャンネルをアーカイブ
