@@ -480,9 +480,10 @@ impl Handler {
 
         // メッセージが2件(Botが最初に投稿するメッセージ)以下だったらスレッドを削除するフラグ
         let should_delete_thread = messages.len() <= 2;
+        // 最新の5件に人間のメッセージがなければ議題メッセージを削除するフラグ
+        let should_delete_agenda_message = !messages.iter().any(|m| !m.author.bot);
 
-        // スレッドを消す予定がない場合は、議題メッセージを変更
-        // 議題メッセージを削除する前に議題メッセージを変更しておくことで、スレッドの最初にメッセージを変えることができる
+        // スレッドを消す予定がない場合は、通話時間等を記録する
         if !should_delete_thread {
             // メンバー取得
             let members = thread_channel_id
@@ -516,39 +517,68 @@ impl Handler {
                 .lock()
                 .await
                 .context("自身のBotユーザーの取得に失敗")?;
-            // 議題メッセージを編集
-            match message
-                .edit(ctx, |m| {
-                    m.content("");
-                    m.embed(|f| {
-                        f.title(&thread_name);
-                        f.description(format!("`{}` のVCが終了しました", &thread_name));
-                        f.field("通話時間", duration, true);
-                        let member_mentions = members
-                            .iter()
-                            .filter_map(|m| m.user_id)
-                            .filter(|m| m != bot)
-                            .map(|m| m.mention().to_string())
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        f.field("参加者", member_mentions, false);
-                        f
-                    });
-                    m.allowed_mentions(|m| m.empty_users());
-                    m
-                })
-                .await
-            {
-                Ok(_) => {}
-                Err(why) => {
-                    // メッセージが編集できなくてもチャンネルをアーカイブしたいので、ログを出力だけしておく
-                    error!("VC解散時に議題メッセージを削除できませんでした: {:?}", why);
-                }
-            };
+
+            // 参加者リストを作成
+            let member_mentions = members
+                .iter()
+                .filter_map(|m| m.user_id)
+                .filter(|m| m != bot)
+                .map(|m| m.mention().to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
+
+            // 議題メッセージを消すか
+            if should_delete_agenda_message {
+                // 議題メッセージを消す場合は新たに投稿する
+                match thread_channel_id
+                    .send_message(ctx, |m| {
+                        m.content("");
+                        m.embed(|f| {
+                            f.title("VCが終了しました");
+                            f.description(format!("`{}` のVCが終了しました", &thread_name));
+                            f.field("通話時間", duration, true);
+                            f.field("参加者", member_mentions, false);
+                            f
+                        });
+                        m.allowed_mentions(|m| m.empty_users());
+                        m
+                    })
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(why) => {
+                        // メッセージが編集できなくてもチャンネルをアーカイブしたいので、ログを出力だけしておく
+                        error!("VC解散時に議題メッセージを削除できませんでした: {:?}", why);
+                    }
+                };
+            } else {
+                // 議題メッセージを編集
+                match message
+                    .edit(ctx, |m| {
+                        m.content("");
+                        m.embed(|f| {
+                            f.title(&thread_name);
+                            f.description(format!("`{}` のVCが終了しました", &thread_name));
+                            f.field("通話時間", duration, true);
+                            f.field("参加者", member_mentions, false);
+                            f
+                        });
+                        m.allowed_mentions(|m| m.empty_users());
+                        m
+                    })
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(why) => {
+                        // メッセージが編集できなくてもチャンネルをアーカイブしたいので、ログを出力だけしておく
+                        error!("VC解散時に議題メッセージを削除できませんでした: {:?}", why);
+                    }
+                };
+            }
         }
 
         // 最新の5件に人間のメッセージがなければ議題メッセージを削除
-        if !messages.iter().any(|m| !m.author.bot) {
+        if should_delete_agenda_message {
             // メッセージがあれば議題メッセージを削除
             match message.delete(&ctx).await {
                 Ok(_) => {}
