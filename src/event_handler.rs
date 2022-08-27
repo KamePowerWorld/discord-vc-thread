@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use anyhow::{Context as _, Result};
 use chrono::Utc;
@@ -18,6 +18,7 @@ use serenity::model::{
     },
     voice::VoiceState,
 };
+use tokio::time::timeout;
 
 use crate::app_config::AppConfig;
 
@@ -391,7 +392,7 @@ impl Handler {
             }
         };
 
-        // VC名前を変更
+        // VCの名前を取得
         let name = interaction
             .data
             .components
@@ -404,13 +405,36 @@ impl Handler {
                 _ => None,
             })
             .ok_or(anyhow::anyhow!("コンポーネントが見つかりません"))?;
-        vc_channel
-            .edit(&ctx, |e| {
-                e.name(name);
-                e
-            })
-            .await
-            .context("VC名前変更に失敗")?;
+
+        // VCの名前を変更
+        let future = vc_channel.edit(&ctx, |e| {
+            e.name(name);
+            e
+        });
+        // レートリミットがかかると遅いので、2秒でタイムアウト
+        let result = match timeout(Duration::from_secs(2), future).await {
+            Ok(result) => result,
+            Err(_) => {
+                return {
+                    interaction
+                        .create_interaction_response(&ctx, |r| {
+                            r.kind(InteractionResponseType::ChannelMessageWithSource)
+                                .interaction_response_data(|d| {
+                                    d.content("❌VCの名前の変更に失敗しました\n```\n短時間に名前変更をしすぎてDiscord APIのレート上限に引っかかった可能性があります\n10分ほど待って再度お試しください```");
+                                    d.ephemeral(true);
+                                    d
+                                });
+                            r
+                        })
+                        .await
+                        .context("エラー内容の応答に失敗")?;
+
+                    Ok(())
+                }
+            }
+        };
+        // 権限などで失敗した場合はエラーを返す
+        result.context("VCの名前変更に失敗")?;
 
         // 返答
         interaction
