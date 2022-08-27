@@ -28,7 +28,7 @@ pub struct Handler {
     /// スレッド→VCのマップ
     thread_to_vc: Arc<Mutex<HashMap<ChannelId, ChannelId>>>,
     /// スレッド→VC作成時のメッセージのIDのマップ
-    thread_to_message: Arc<Mutex<HashMap<ChannelId, Message>>>,
+    thread_to_agenda_message: Arc<Mutex<HashMap<ChannelId, Message>>>,
 }
 
 impl Handler {
@@ -38,7 +38,7 @@ impl Handler {
             app_config,
             vc_to_thread: Arc::new(Mutex::new(HashMap::new())),
             thread_to_vc: Arc::new(Mutex::new(HashMap::new())),
-            thread_to_message: Arc::new(Mutex::new(HashMap::new())),
+            thread_to_agenda_message: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -185,40 +185,11 @@ impl Handler {
                     .insert(vc_channel_id.clone(), thread.id);
 
                 // チャンネルID->スレッドを登録
-                self.thread_to_message
+                self.thread_to_agenda_message
                     .lock()
                     .await
                     .insert(thread.id, message);
             }
-        };
-
-        Ok(())
-    }
-
-    /// VC削除時にスレッドをアーカイブする
-    async fn archive_thread(&self, ctx: &Context, vc_channel_id: &ChannelId) -> Result<()> {
-        // マップからスレッドのチャンネルIDを取得
-        let channel_id = self
-            .vc_to_thread
-            .lock()
-            .await
-            .get(vc_channel_id)
-            .map(|c| c.clone());
-        // 一度変数に入れてからmatchにいれないとロックされっぱなしになる
-        match channel_id {
-            // スレッドが作成済みの場合
-            Some(thread_id) => {
-                // スレッドをアーカイブ
-                thread_id
-                    .edit_thread(ctx, |t| {
-                        t.archived(true);
-                        t
-                    })
-                    .await
-                    .context("スレッドのアーカイブに失敗")?;
-            }
-            // スレッドが作成されていない場合
-            None => {}
         };
 
         Ok(())
@@ -413,44 +384,37 @@ impl Handler {
         Ok(())
     }
 
-    /// 誰も話していないスレッドのメッセージを消す
-    async fn delete_message_if_no_talk(&self, ctx: &Context, channel: &GuildChannel) -> Result<()> {
-        // マップからスレッドのチャンネルIDを取得
-        let channel_id = self
-            .vc_to_thread
-            .lock()
-            .await
-            .get(&channel.id)
-            .map(|c| c.clone());
-
-        // チャンネルIDが見つけれなければ終了
-        let channel_id = match channel_id {
-            Some(channel_id) => channel_id,
-            None => return Ok(()),
-        };
-
+    /// 誰も話していないスレッドの議題メッセージを消す
+    async fn delete_agenda_message_if_no_talk(&self, ctx: &Context, thread_channel_id: &ChannelId) -> Result<bool> {
         // 最近5件のメッセージを取得
-        let messages = channel_id.messages(&ctx, |f| {
+        let messages = thread_channel_id.messages(&ctx, |f| {
             f.limit(5);
             f
         }).await.context("メッセージ取得に失敗")?;
         
-        // 最新の5件に人間のメッセージがなければスレッドのメッセージを削除
+        // 最新の5件に人間のメッセージがなければ議題メッセージを削除
         if messages.iter().any(|m| !m.author.bot) {
-            return Ok(())
+            return Ok(false)
         }
     
-        // ボット以外のメッセージがないため、スレッドのメッセージを削除
-        // チャンネルID->メッセージを取得
-        if let Some(message) = self.thread_to_message
+        // ボット以外のメッセージがないため、議題メッセージを削除
+        // チャンネルID->議題メッセージを取得
+        if let Some(message) = self.thread_to_agenda_message
             .lock()
             .await
-            .get(&channel_id) {
-                // メッセージがあれば削除
-                message.delete(&ctx).await.context("メッセージ削除に失敗")?;
+            .get(&thread_channel_id) {
+                // メッセージがあれば議題メッセージを削除
+                match message.delete(&ctx).await {
+                    Ok(_) => {},
+                    Err(why) => {
+                        // メッセージが削除できなくてもチャンネルをアーカイブしたいので、ログを出力だけしておく
+                        error!("VC解散時に議題メッセージを削除できませんでした: {:?}", why);
+                    }
+                };
             }
 
-        Ok(())
+        // メッセージが2件(Botが最初に投稿するメッセージ)以下だったらスレッドを削除するフラグを返す
+        Ok(messages.len() <= 2)
     }
 }
 
@@ -490,26 +454,57 @@ impl EventHandler for Handler {
     }
 
     /// VC削除時
-    async fn channel_delete(&self, ctx: Context, channel: &GuildChannel) {
+    async fn channel_delete(&self, ctx: Context, vc_channel: &GuildChannel) {
         // カスタムVCでない場合は無視
-        if !self.is_custom_vc(channel) {
+        if !self.is_custom_vc(vc_channel) {
             return;
         }
 
-        // VCで誰も喋ってなかったらメッセージを削除
-        match self.delete_message_if_no_talk(&ctx, channel).await {
-            Ok(_) => {}
-            Err(why) => {
-                error!("VCチャンネルで会話がなかったが、メッセージ削除に失敗: {:?}", why);
-            }
-        }
+        // マップからスレッドのチャンネルIDを取得
+        // 一度変数に入れてからmatchにいれないとロックされっぱなしになる
+        let thread_channel_id = self
+            .vc_to_thread
+            .lock()
+            .await
+            .get(&vc_channel.id)
+            .map(|c| c.clone());
 
-        // VCスレッドチャンネルをアーカイブ
-        match self.archive_thread(&ctx, &channel.id).await {
-            Ok(_) => {}
+        // チャンネルIDが見つけれなければ終了
+        let thread_channel_id = match thread_channel_id {
+            Some(channel_id) => channel_id,
+            None => return,
+        };
+
+        // VCで誰も喋ってなかったら議題メッセージを削除
+        let should_delete = match self.delete_agenda_message_if_no_talk(&ctx, &thread_channel_id).await {
+            Ok(del) => del,
             Err(why) => {
-                error!("VCスレッドチャンネルのアーカイブに失敗: {:?}", why);
-                return;
+                error!("VCチャンネルで会話がなかったが、議題メッセージ削除に失敗: {:?}", why);
+                false
+            }
+        };
+
+        // 2件以上のメッセージがなければスレッドを削除する
+        if should_delete {
+            // VCスレッドチャンネルを削除
+            match thread_channel_id.delete(&ctx).await {
+                Ok(_) => {}
+                Err(why) => {
+                    error!("VCスレッドチャンネルの削除に失敗: {:?}", why);
+                    return;
+                }
+            }
+        } else {
+            // VCスレッドチャンネルをアーカイブ
+            match thread_channel_id.edit_thread(ctx, |t| {
+                t.archived(true);
+                t
+            }).await {
+                Ok(_) => {}
+                Err(why) => {
+                    error!("VCスレッドチャンネルのアーカイブに失敗: {:?}", why);
+                    return;
+                }
             }
         }
     }
