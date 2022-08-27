@@ -7,7 +7,9 @@ version = "0.1.0"
 
 [dependencies]
 anyhow = "1.0.57"
+chrono = "0.4.21"
 config = "0.13.1"
+hhmmss = "0.1.0"
 log = "0.4.17"
 log4rs = "1.1.1"
 serde = "1.0.137"

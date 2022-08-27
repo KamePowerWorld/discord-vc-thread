@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Context as _, Result};
+use chrono::Utc;
 use log::{error, warn};
 use serenity::model::{
     application::interaction::{Interaction, InteractionResponseType},
@@ -13,6 +14,7 @@ use serenity::model::{
     },
     voice::VoiceState,
 };
+use hhmmss::Hhmmss;
 
 use crate::app_config::AppConfig;
 
@@ -422,12 +424,23 @@ impl Handler {
         } else {
             // メンバー取得
             let members = thread_channel_id.get_thread_members(&ctx).await.context("メンバー取得に失敗")?;
-            // スレッドの名前を取得
-            let thread_name = match thread_channel_id.to_channel(&ctx).await? {
-                Channel::Guild(guild_channel) => guild_channel.name.clone(),
-                _ => "不明なVC".to_string(),
+            // スレッドの名前と作成時刻を取得
+            let (thread_name, thread_created_at) = match thread_channel_id.to_channel(&ctx).await? {
+                Channel::Guild(guild_channel) => {
+                    let thread_name = guild_channel.name.clone();
+                    let thread_created_at = guild_channel.thread_metadata.and_then(|m| m.create_timestamp);
+                    (thread_name, thread_created_at)
+                },
+                _ => ("不明なVC".to_string(), None),
             };
-            // let timestamp = thread_channel_id.
+            // 通話時間を計算
+            let duration = thread_created_at.map(|created_at| {
+                let created_at = created_at.naive_utc();
+                let now = Utc::now().naive_utc();
+                let duration = now - created_at;
+                duration.hhmmss()
+            }).unwrap_or("--:--:--".to_string());
+            
             // Botを取得
             let bot = &self.bot_user_id.lock().await.context("自身のBotユーザーの取得に失敗")?;
             // 議題メッセージを編集
@@ -435,7 +448,7 @@ impl Handler {
                 m.content(format!(
                     "`{}` のVCが終了しました。\n通話時間: `{}`\n参加者: {}",
                     thread_name,
-                    "00:00:00",
+                    duration,
                     members.iter().filter_map(|m| m.user_id).filter(|m| m != bot).map(|m| m.mention().to_string()).collect::<Vec<_>>().join(" "),
                 ));
                 m.allowed_mentions(|m| m.empty_users());
