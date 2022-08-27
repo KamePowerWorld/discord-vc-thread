@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
 use anyhow::{Context as _, Result};
 use log::{error, warn};
@@ -9,7 +9,7 @@ use serenity::model::{
     id::ChannelId,
     prelude::{
         component::{ButtonStyle, InputTextStyle, ActionRowComponent},
-        Channel, ChannelType, GuildChannel, interaction::{message_component::MessageComponentInteraction, modal::ModalSubmitInteraction}, Message,
+        Channel, ChannelType, GuildChannel, interaction::{message_component::MessageComponentInteraction, modal::ModalSubmitInteraction}, Message, UserId,
     },
     voice::VoiceState,
 };
@@ -21,24 +21,27 @@ use serenity::prelude::*;
 
 /// イベント受信リスナー
 pub struct Handler {
+    /// Bot
+    bot_user_id: Mutex<Option<UserId>>,
     /// 設定
     app_config: AppConfig,
     /// VC→スレッドのマップ
-    vc_to_thread: Arc<Mutex<HashMap<ChannelId, ChannelId>>>,
+    vc_to_thread: Mutex<HashMap<ChannelId, ChannelId>>,
     /// スレッド→VCのマップ
-    thread_to_vc: Arc<Mutex<HashMap<ChannelId, ChannelId>>>,
+    thread_to_vc: Mutex<HashMap<ChannelId, ChannelId>>,
     /// スレッド→VC作成時のメッセージのIDのマップ
-    thread_to_agenda_message: Arc<Mutex<HashMap<ChannelId, Message>>>,
+    thread_to_agenda_message: Mutex<HashMap<ChannelId, Message>>,
 }
 
 impl Handler {
     /// コンストラクタ
     pub fn new(app_config: AppConfig) -> Result<Self> {
         Ok(Self {
+            bot_user_id: Mutex::new(None),
             app_config,
-            vc_to_thread: Arc::new(Mutex::new(HashMap::new())),
-            thread_to_vc: Arc::new(Mutex::new(HashMap::new())),
-            thread_to_agenda_message: Arc::new(Mutex::new(HashMap::new())),
+            vc_to_thread: Mutex::new(HashMap::new()),
+            thread_to_vc: Mutex::new(HashMap::new()),
+            thread_to_agenda_message: Mutex::new(HashMap::new()),
         })
     }
 
@@ -118,10 +121,10 @@ impl Handler {
                 let channel_name = vc_channel_id
                     .name(&ctx)
                     .await
-                    .unwrap_or("不明なチャンネル".to_string());
+                    .unwrap_or("不明なVC".to_string());
                 // VCカテゴリチャンネルにメッセージを送信
                 let thread_channel = self.app_config.discord.thread_channel;
-                // メッセージを送信
+                // 議題メッセージを送信
                 let message = thread_channel
                     .send_message(ctx, |m| {
                         m.content(format!(
@@ -133,7 +136,7 @@ impl Handler {
                         m
                     })
                     .await
-                    .context("作成メッセージの送信に失敗")?;
+                    .context("議題メッセージの送信に失敗")?;
                 // スレッドを作成
                 let thread = thread_channel
                     .create_public_thread(ctx, &message, |m| {
@@ -212,7 +215,7 @@ impl Handler {
                 let channel_name = vc_channel_id
                     .name(&ctx)
                     .await
-                    .unwrap_or("不明なチャンネル".to_string());
+                    .unwrap_or("不明なVC".to_string());
                 // スレッドをリネーム
                 thread_id
                     .edit_thread(ctx, |t| {
@@ -384,37 +387,71 @@ impl Handler {
         Ok(())
     }
 
-    /// 誰も話していないスレッドの議題メッセージを消す
-    async fn delete_agenda_message_if_no_talk(&self, ctx: &Context, thread_channel_id: &ChannelId) -> Result<bool> {
+    /// スレッドの議題メッセージを後始末する
+    async fn finalize_agenda_message(&self, ctx: &Context, thread_channel_id: &ChannelId) -> Result<bool> {
         // 最近5件のメッセージを取得
         let messages = thread_channel_id.messages(&ctx, |f| {
             f.limit(5);
             f
         }).await.context("メッセージ取得に失敗")?;
         
-        // 最新の5件に人間のメッセージがなければ議題メッセージを削除
-        if messages.iter().any(|m| !m.author.bot) {
-            return Ok(false)
-        }
-    
-        // ボット以外のメッセージがないため、議題メッセージを削除
         // チャンネルID->議題メッセージを取得
-        if let Some(message) = self.thread_to_agenda_message
+        let mut message_map = self.thread_to_agenda_message
             .lock()
-            .await
-            .get(&thread_channel_id) {
-                // メッセージがあれば議題メッセージを削除
-                match message.delete(&ctx).await {
-                    Ok(_) => {},
-                    Err(why) => {
-                        // メッセージが削除できなくてもチャンネルをアーカイブしたいので、ログを出力だけしておく
-                        error!("VC解散時に議題メッセージを削除できませんでした: {:?}", why);
-                    }
-                };
-            }
+            .await;
+        let message = match message_map
+            .get_mut(&thread_channel_id) {
+                Some(message) => message,
+                None => return Ok(false),
+            };
 
-        // メッセージが2件(Botが最初に投稿するメッセージ)以下だったらスレッドを削除するフラグを返す
-        Ok(messages.len() <= 2)
+        // 最新の5件に人間のメッセージがなければ議題メッセージを削除
+        let should_delete_agenda_message = !messages.iter().any(|m| !m.author.bot);
+        let should_delete_thread = if should_delete_agenda_message {
+            // メッセージがあれば議題メッセージを削除
+            match message.delete(&ctx).await {
+                Ok(_) => {},
+                Err(why) => {
+                    // メッセージが削除できなくてもチャンネルをアーカイブしたいので、ログを出力だけしておく
+                    error!("VC解散時に議題メッセージを削除できませんでした: {:?}", why);
+                }
+            };
+
+            // メッセージが2件(Botが最初に投稿するメッセージ)以下だったらスレッドを削除するフラグを返す
+            messages.len() <= 2
+        } else {
+            // メンバー取得
+            let members = thread_channel_id.get_thread_members(&ctx).await.context("メンバー取得に失敗")?;
+            // スレッドの名前を取得
+            let thread_name = match thread_channel_id.to_channel(&ctx).await? {
+                Channel::Guild(guild_channel) => guild_channel.name.clone(),
+                _ => "不明なVC".to_string(),
+            };
+            // let timestamp = thread_channel_id.
+            // Botを取得
+            let bot = &self.bot_user_id.lock().await.context("自身のBotユーザーの取得に失敗")?;
+            // 議題メッセージを編集
+            match message.edit(ctx, |m| {
+                m.content(format!(
+                    "`{}` のVCが終了しました。\n通話時間: `{}`\n参加者: {}",
+                    thread_name,
+                    "00:00:00",
+                    members.iter().filter_map(|m| m.user_id).filter(|m| m != bot).map(|m| m.mention().to_string()).collect::<Vec<_>>().join(" "),
+                ));
+                m.allowed_mentions(|m| m.empty_users());
+                m
+            }).await {
+                Ok(_) => {},
+                Err(why) => {
+                    // メッセージが編集できなくてもチャンネルをアーカイブしたいので、ログを出力だけしておく
+                    error!("VC解散時に議題メッセージを削除できませんでした: {:?}", why);
+                }
+            };
+            
+            false
+        };
+
+        Ok(should_delete_thread)
     }
 }
 
@@ -423,6 +460,10 @@ impl EventHandler for Handler {
     /// 準備完了時に呼ばれる
     async fn ready(&self, _ctx: Context, data_about_bot: Ready) {
         warn!("Bot準備完了: {}", data_about_bot.user.tag());
+
+        // Bot自身のIDを取得
+        let mut bot_user_id = self.bot_user_id.lock().await;
+        *bot_user_id = Some(data_about_bot.user.id.clone());
     }
 
     /// VCで話すボタンが押された時
@@ -476,7 +517,7 @@ impl EventHandler for Handler {
         };
 
         // VCで誰も喋ってなかったら議題メッセージを削除
-        let should_delete = match self.delete_agenda_message_if_no_talk(&ctx, &thread_channel_id).await {
+        let should_delete = match self.finalize_agenda_message(&ctx, &thread_channel_id).await {
             Ok(del) => del,
             Err(why) => {
                 error!("VCチャンネルで会話がなかったが、議題メッセージ削除に失敗: {:?}", why);
